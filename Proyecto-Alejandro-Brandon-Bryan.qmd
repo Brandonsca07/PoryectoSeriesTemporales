@@ -1,0 +1,1389 @@
+---
+title: "Series de Tiempo de las Finanzas Públicas de Costa Rica"
+subtitle: "Balance Presupuestario (2018-2026)"
+author:
+  - "Alejandro Bonilla; C21273"
+  - "Brandon Campos; B91500"
+  - "Bryan Segura; C17440"
+format:
+  pdf:
+    toc: true
+    number-sections: false
+    fig-width: 7
+    fig-height: 4
+    include-in-header:
+      text: |
+        \renewcommand{\and}{\\}
+execute:
+  echo: false
+  warning: false
+  message: false
+bibliography: referencias.bib
+citeproc: true
+csl: apa.csl
+---
+
+```{r librerias, warning=FALSE, message=FALSE}
+library(forecast)
+library(fpp2)
+library(data.table)
+library(TTR)
+library(xts)
+library(tidyverse)
+library(lubridate)
+library(DT)
+library(tseries)
+library(quantmod)
+library(plotly)
+library(readxl)
+library(RColorBrewer)
+library(TSA)
+library(astsa)
+library(fGarch)
+library(scales)
+```
+
+```{r egresos-carga}
+load("base_egresos.RData")
+
+egresos_mensual <- base_egresos %>%
+  group_by(año, Mes) %>%
+  summarise(DE_Monto_Acumulado = sum(DE_Monto, na.rm = TRUE), .groups = "drop") %>%
+  mutate(Mes = as.numeric(Mes)) %>%
+  arrange(año, Mes) %>%
+  group_by(año) %>%
+  mutate(DE_Monto_Mes = if_else(Mes == 1,
+                                 DE_Monto_Acumulado,
+                                 DE_Monto_Acumulado - lag(DE_Monto_Acumulado))) %>%
+  ungroup() %>%
+  mutate(fecha = as.Date(paste(año, Mes, "01", sep = "-")))
+
+Egresos_ts <- ts(egresos_mensual$DE_Monto_Mes, start = c(2018, 1), frequency = 12)
+```
+
+```{r ingresos-carga}
+load("base_ingresos.RData")
+
+ingresos_mensual <- base_ingresos %>%
+  group_by(año, Mes) %>%
+  summarise(DE_Monto_Acumulado = sum(DE_Monto, na.rm = TRUE), .groups = "drop") %>%
+  mutate(Mes = as.numeric(Mes)) %>%
+  arrange(año, Mes) %>%
+  group_by(año) %>%
+  mutate(DE_Monto_Mes = if_else(Mes == 1,
+                                 DE_Monto_Acumulado,
+                                 DE_Monto_Acumulado - lag(DE_Monto_Acumulado))) %>%
+  ungroup() %>%
+  mutate(fecha = as.Date(paste(año, Mes, "01", sep = "-")))
+
+Ingresos_ts <- ts(ingresos_mensual$DE_Monto_Mes, start = c(2018, 1), frequency = 12)
+```
+
+```{r ipc-carga}
+ipc_excel <- read_excel("IPC_calculado.xlsx", sheet = "Series")
+IPC_ts <- ts(ipc_excel$`IPC (Junio 2026 = 100)`, start = c(2018, 1), frequency = 12)
+
+#autoplot(IPC_ts) +
+ #xlab("Año") + ylab("IPC") +
+  #theme_minimal()
+```
+
+```{r balance}
+Egresos_real_ts  <- Egresos_ts  / IPC_ts * 100
+Ingresos_real_ts <- Ingresos_ts / IPC_ts * 100
+
+Balance <- Ingresos_ts - Egresos_ts
+Balance_ts <- Balance / 1000000
+Balance_real <- Ingresos_real_ts - Egresos_real_ts
+Balance_real_ts <- Balance_real / 1000000
+save(Balance_real_ts, file = "Balance_real_ts.RData")
+```
+
+```{r}
+load("Balance_real_ts.RData")
+```
+
+# Resumen
+
+Este estudio analiza y pronostica la dinámica temporal del balance presupuestario mensual real del Gobierno Central de Costa Rica entre enero de 2018 y julio de 2026 ($T = 103$ observaciones), construido a partir de datos de ingresos y egresos del Ministerio de Hacienda deflactados con el Índice de Precios al Consumidor (IPC) del Banco Central de Costa Rica en colones constantes de junio de 2026. Mediante una partición cronológica que reservó los últimos $h = 12$ meses (agosto de 2025 a julio de 2026) para prueba y utilizó las primeras 91 observaciones para entrenamiento, se compararon especificaciones de suavizamiento exponencial, modelos ARIMA/SARIMA y regresiones dinámicas con variables de calendario utilizando la raíz del error cuadrático medio (RMSE) como criterio principal de selección. El modelo elegido fue la especificación SARIMA $(0,0,1)(0,0,2)_{12}$ (mod3), que alcanzó en el conjunto de prueba un RMSE de 298,477.8, un MAE de 223,309.0 y un MASE de 0.84 (con MAPE de 269.83, métrica secundaria debido a valores cercanos a cero o negativos del balance). Sus residuos no presentan autocorrelación serial significativa (Ljung-Box $p = 0.9656$), aunque se apartan de la normalidad por asimetría y valores atípicos (Shapiro-Wilk $p = 0.0001$; Jarque-Bera $< 0.0001$), lo que respalda su utilidad predictiva cautelosa para el seguimiento fiscal. 
+
+**Palabras clave:** balance presupuestario real, finanzas públicas de Costa Rica, series de tiempo, modelos SARIMA, pronóstico fiscal.
+
+# Introducción
+
+Las finanzas públicas comprenden el conjunto de actividades mediante las cuales el Estado obtiene, administra, asigna y utiliza los recursos necesarios para el cumplimiento de sus funciones y objetivos. En Costa Rica, la administración de estos recursos públicos se encuentra respaldada por un marco jurídico establecido, entre otras normas, por la Ley N.º 8131, Ley de Administración Financiera de la República y Presupuestos Públicos, la cual regula el régimen económico-financiero de los órganos y entes administradores de fondos públicos y establece un sistema de administración financiera compuesto por los subsistemas de presupuesto, tesorería, crédito público y contabilidad [@asamblea2001]. Dentro de este marco, el presupuesto público constituye uno de los principales instrumentos mediante los cuales se hace el seguimiento y evaluación de los recursos del Estado. La Ley N.º 8131 establece que el presupuesto debe incorporar tanto los ingresos como los gastos asociados con la actividad financiera pública.
+
+El análisis del balance presupuestario es determinante para evaluar la salud fiscal, la estabilidad macroeconómica y la sostenibilidad financiera del Gobierno Central a mediano plazo. Como señala @oecd2023, la contención del gasto y el cumplimiento de las metas fiscales son fundamentales para garantizar la sostenibilidad de la deuda pública y respaldar los esfuerzos de consolidación económica. Por ende, modelar y pronosticar la interacción entre lo que el Estado recauda y lo que ejecuta permite anticipar necesidades de financiamiento y prevenir déficits fiscales elevados.
+
+### Contexto de la serie y utilidad de su pronóstico
+
+El estudio de las series temporales de ingresos y egresos públicos resulta indispensable porque permite capturar la dinámica de las cuentas fiscales frente a fluctuaciones macroeconómicas, ciclos económicos y cambios institucionales [@pujol2012; @cuitino2008]. En economías pequeñas y abiertas como la costarricense, las finanzas públicas están estrechamente vinculadas con el ciclo económico [@camacho2022], la inflación y los precios relativos [@cuitino2008]. Por un lado, las presiones derivadas del déficit fiscal obligan al Ministerio de Hacienda a recurrir al mercado financiero para cubrir la brecha presupuestaria, lo que a mediano y largo plazo incide sobre las tasas de interés de referencia del mercado, como la Tasa Básica Pasiva [@vargas2019]. Por otro lado, la volatilidad y el comportamiento estocástico de la recaudación tributaria dificultan la planificación anual del gasto público [@pujol2012], mientras que choques inflacionarios o cambiarios alteran de forma asimétrica el valor real de los ingresos tributarios, el gasto primario indexado y el servicio de la deuda [@cuitino2008]. En consecuencia, pronosticar ambas series proporciona un insumo técnico clave para evaluar la sostenibilidad fiscal, anticipar desequilibrios financieros y orientar la toma de decisiones de política económica [@vargas2019; @pujol2012; @camacho2022].
+
+### Modelos empleados en la literatura
+
+En la literatura empírica sobre series de tiempo fiscales, financieras y macroeconómicas, el abordaje metodológico suele articular modelos univariados, filtros de descomposición, especificaciones multivariadas y enfoques no paramétricos. Por un lado, la metodología de Box-Jenkins,en particular los modelos autorregresivos integrados de media móvil ($ARIMA$ y $SARIMA$) es ampliamente empleada para modelar procesos de caminata aleatoria, evaluar la estacionariedad mediante pruebas de raíz unitaria como Dickey-Fuller y proyectar series financieras o de ingresos públicos [@pujol2012; @vargas2019]. Asimismo, en estudios macroeconómicos aplicados a Costa Rica se utiliza el filtro de Hodrick-Prescott para separar el componente tendencial de las fluctuaciones cíclicas de corto plazo antes de realizar estimaciones o pronósticos [@vargas2019; @camacho2022]. Cuando el análisis busca capturar la interacción simultánea y dinámica entre variables fiscales (como ingresos, egresos o resultado fiscal) y factores macroeconómicos sin imponer supuestos de exogeneidad estricta, la literatura recurre a los Vectores Autorregresivos ($VAR$) y a los Modelos de Corrección de Errores ($VECM$) cuando existe cointegración, complementados con pruebas de causalidad de Granger, funciones de impulso-respuesta y descomposición de la varianza para evaluar el impacto y la persistencia de los choques [@cuitino2008; @vargas2019; @camacho2022]. De manera complementaria, también se han incorporado modelos no paramétricos y de aprendizaje automático, como las redes neuronales artificiales autorregresivas, para capturar posibles no linealidades y contrastar su capacidad predictiva frente a los enfoques econométricos tradicionales [@vargas2019].
+
+### Objetivos
+
+**Objetivo general**
+
+Analizar y pronosticar la dinámica temporal de las series del balance presupuestario del Gobierno Central de Costa Rica mediante modelos de series de tiempo, con el fin de evaluar su comportamiento futuro y su implicación en el balance presupuestario.
+
+**Objetivos específicos**
+
+1.  Describir el comportamiento histórico, la tendencia, la estacionalidad y las propiedades de estacionariedad de las series del balance presupuestario.
+
+2.  Estimar y comparar distintos modelos de pronóstico evaluando el cumplimiento de sus supuestos estadísticos y su precisión predictiva.
+
+3.  Generar proyecciones a corto y mediano plazo que permitan anticipar posibles brechas fiscales y apoyar la planificación financiera.
+
+# Metodología
+
+
+## Fuente y construcción de los datos
+
+El objeto de estudio es el balance presupuestario mensual del Gobierno Central de Costa Rica, definido como la diferencia entre los ingresos y los egresos del periodo. La serie comprende de enero de 2018 a julio de 2026, para un total de $T = 103$ observaciones mensuales. Los datos de ingresos y egresos se obtuvieron del Ministerio de Hacienda de Costa Rica, específicamente del portal Presupuesto Nacional en Datos Abiertos, que dispone de bases de datos históricas sobre ingresos, egresos y ejecución presupuestaria del Gobierno Central [@hacienda2026]. Por su parte, el índice de precios al consumidor (IPC) se obtuvo del Banco Central de Costa Rica, mediante su sección de Indicadores Económicos, en la serie correspondiente al Índice de precios al consumidor [@bccr2026].
+
+Los registros de ingresos y egresos se encontraban expresados en montos acumulados dentro de cada año fiscal. Por esta razón, los valores mensuales se calcularon mediante las diferencias entre los acumulados de meses consecutivos. Para enero se utilizó directamente el monto acumulado de ese mes. Este procedimiento se aplicó por separado a los ingresos y a los egresos.
+
+Con el propósito de eliminar el efecto de la inflación, ambas series se expresaron en colones constantes de junio de 2026, utilizando el IPC con base junio de 2026 = 100. Se utilizó la serie histórica enlazada publicada por el Banco Central de Costa Rica, que permite mantener la continuidad del índice a través de sus cambios de base. Posteriormente, se calculó el balance real en millones de colones mediante la diferencia entre los ingresos y los egresos reales:
+
+$$
+y_t = \frac{1}{10^6}
+\left[
+\left(\frac{I_t}{\mathrm{IPC}_t}\right)\times 100
+-
+\left(\frac{E_t}{\mathrm{IPC}_t}\right)\times 100
+\right]
+$$
+
+donde $I_t$ y $E_t$ representan los ingresos y egresos nominales del mes $t$, respectivamente, y $\mathrm{IPC}_t$ corresponde al índice de precios al consumidor del mismo periodo. El análisis se realizó directamente sobre esta serie, debido a que el interés de la investigación se centra en el resultado fiscal neto del Gobierno Central.
+
+### Calidad de los datos
+
+La calidad de los datos se evaluó mediante la revisión de su completitud, consistencia y presencia de valores atípicos. No se identificaron valores faltantes en las series de ingresos, egresos ni IPC. Asimismo, se verificó que los montos acumulados no presentaran disminuciones dentro de cada año fiscal y que no existieran meses sin información. Finalmente, no se detectaron valores atípicos que requirieran un tratamiento particular, por lo que se conservaron todas las observaciones.
+
+## Análisis exploratorio
+
+El análisis exploratorio permitió identificar las principales características de la serie y orientar la selección de los modelos de pronóstico. Para ello, se examinó gráficamente el comportamiento del balance nominal y real, se realizó una descomposición clásica aditiva con periodo estacional de 12 meses y se elaboraron gráficos estacionales por año.
+
+La dependencia temporal se estudió mediante las funciones de autocorrelación (ACF) y autocorrelación parcial (PACF), tanto para la serie en niveles como para las series diferenciadas. Adicionalmente, se aplicó la prueba de Ljung-Box con 24 rezagos para evaluar la presencia de autocorrelación conjunta. La estacionariedad se examinó mediante la prueba de Dickey-Fuller aumentada (ADF) [@dickey1979], aplicada a la primera diferencia regular y a una transformación que incorpora tanto la diferenciación regular como la estacional.
+
+Los resultados exploratorios no mostraron una tendencia claramente definida en la serie. Sin embargo, la descomposición y los gráficos estacionales sugirieron la presencia de una componente estacional, aunque no necesariamente marcada en todos los periodos. La inspección de la ACF y la PACF permitió identificar algunas desviaciones aisladas, particularmente en los rezagos 10 y 24, mientras que la mayoría de los coeficientes se mantuvo dentro de las bandas de confianza.
+
+Por otra parte, la prueba de Ljung-Box aplicada a la serie en niveles no evidenció autocorrelación conjunta estadísticamente significativa en los primeros 24 rezagos. Este resultado indica que no se encontró evidencia suficiente de dependencia lineal conjunta en ese conjunto de rezagos, aunque no demuestra por sí mismo que la serie sea completamente independiente o que carezca de estacionalidad.
+
+Para complementar el análisis, se examinó la primera diferencia regular de la serie y, posteriormente, se aplicó una diferenciación estacional de rezago 12 sobre dicha transformación. Las pruebas ADF aplicadas a estas series diferenciadas permitieron rechazar la hipótesis nula de raíz unitaria. Estos resultados se utilizaron como parte del análisis exploratorio y de la evaluación de las posibles especificaciones de diferenciación.
+
+Finalmente, aunque la variabilidad global de la serie se mantuvo en un rango relativamente estable, se observaron fluctuaciones de distinta amplitud a lo largo del periodo analizado. Estos hallazgos orientaron la evaluación de modelos de suavizamiento exponencial, modelos ARIMA y SARIMA, regresiones con variables de calendario y modelos de regresión dinámica.
+
+### Diseño de validación
+
+La capacidad predictiva de los modelos se evaluó mediante una partición cronológica. De las $T = 103$ observaciones disponibles, las primeras $T_e = 91$, correspondientes al periodo de enero de 2018 a julio de 2025, se utilizaron para el entrenamiento. Las últimas $h = 12$ observaciones, de agosto de 2025 a julio de 2026, se reservaron para la prueba.
+
+Todos los modelos se estimaron utilizando únicamente el conjunto de entrenamiento y sus pronósticos se evaluaron sobre el mismo periodo de prueba. De esta manera, se mantuvo el orden temporal de las observaciones y se evitó utilizar información futura durante la estimación. El horizonte de evaluación fue de 12 meses.
+
+## Modelos considerados
+
+Se evaluaron cuatro familias de modelos: suavizamiento exponencial, ARIMA/SARIMA, regresión y regresión dinámica. Dentro de cada familia se consideraron distintas especificaciones, de acuerdo con las características identificadas durante el análisis exploratorio y los resultados obtenidos durante el proceso de modelación.
+
+
+### Suavizamiento exponencial
+
+Suavizamiento exponencial
+
+El suavizamiento exponencial simple (SES) es un método de pronóstico que representa la serie mediante un nivel que se actualiza utilizando las observaciones recientes y la información acumulada previamente [@hyndman2021]. Su formulación es:
+
+$$
+\begin{aligned}
+\hat{y}_{t+h|t} &= \ell_t, \\
+\ell_t &= \alpha y_t + (1-\alpha)\ell_{t-1},
+\qquad 0 < \alpha < 1.
+\end{aligned}
+$$
+
+En esta expresión, $\ell_t$ representa el nivel de la serie y $\alpha$ es el parámetro de suavizamiento. Un valor cercano a 1 hace que el modelo reaccione con mayor rapidez a los cambios recientes, mientras que un valor cercano a 0 produce un nivel más estable. El modelo supone que las observaciones fluctúan alrededor de un nivel, sin incorporar componentes explícitos de tendencia o estacionalidad, por lo que genera pronósticos constantes a lo largo del horizonte.
+
+Además del SES, se utilizó el procedimiento automático de selección ETS mediante la función ets(). Este identificó una estructura ETS(A,N,N), sin tendencia ni estacionalidad, equivalente al suavizamiento exponencial simple. Por tanto, ambas alternativas condujeron a la misma estructura de modelación.
+
+En este caso se selecciono el suavizamiento exponencial simple (SES) y selección automática ETS mediante el procedimiento ets().
+
+### ARIMA/SARIMA
+
+Los modelos ARIMA describen la dependencia temporal de una serie mediante sus valores pasados y los errores de pronóstico, incorporando diferenciaciones cuando se requiere [@box2015]. Su extensión estacional, SARIMA, permite modelar adicionalmente patrones de dependencia asociados a periodos específicos.
+
+Entre las especificaciones evaluadas se incluyeron modelos ARIMA y SARIMA con diferentes estructuras de medias móviles y órdenes de diferenciación. Se estimó un modelo ARIMA(0,0,1), un modelo seleccionado automáticamente mediante auto.arima() y diferentes especificaciones SARIMA. Estas últimas incluyeron alternativas con diferenciación estacional y sin ella.
+
+El modelo finalista de esta familia fue un SARIMA(0,0,1)(0,0,2) con periodo estacional de 12 meses. Esta especificación incorpora un término de media móvil regular y dos términos de media móvil estacional, asociados a los rezagos 12 y 24. El modelo se expresa como:
+
+$$
+y_t =
+\mu +
+(1+\theta_1 B)
+(1+\Theta_1 B^{12}+\Theta_2 B^{24})
+\varepsilon_t.
+$$
+
+En esta expresión, $\mu$ representa la media del proceso, $B$ es el operador de rezago, $\theta_1$ es el parámetro de media móvil regular y $\Theta_1$ y $\Theta_2$ son los parámetros de media móvil estacional. Por su parte, $\varepsilon_t$ representa un término de ruido blanco.
+
+El modelo seleccionado no incorpora diferenciación regular ni estacional, por lo que opera directamente sobre la serie en niveles. En su notación, esto corresponde a $d=0$ y $D=0$. La presencia de dos términos de media móvil estacional, representada por $Q=2$, no implica la aplicación de dos diferenciaciones. La estimación de los parámetros se realizó mediante máxima verosimilitud.
+
+Para la investigacion se empelo el modelo ARIMA(0,0,1); modelo seleccionado automáticamente mediante auto.arima(); SARIMA(0,0,1)(0,0,2) con periodo estacional 12; SARIMA(0,0,1)(0,0,1) con periodo estacional 12; y SARIMA(0,0,1)(0,1,2) con periodo estacional 12.
+
+### Regresión
+
+Los modelos de regresión incorporan variables determinísticas para representar posibles diferencias en el balance presupuestario asociadas a determinados meses del año [@hyndman2021]. Se evaluaron distintas especificaciones que incluyeron una tendencia temporal y variables indicadoras mensuales, así como modelos que consideraron específicamente los meses de marzo y noviembre.
+
+Para seleccionar la estructura de regresión se examinaron inicialmente tres especificaciones: una que incorporaba tendencia y variables indicadoras mensuales, otra que incluía tendencia e indicadores de marzo y noviembre, y una tercera que consideraba únicamente los indicadores de marzo y noviembre. Estas especificaciones se estimaron con errores ARIMA(0,0,0) y se compararon mediante el criterio de información de Akaike corregido (AICc). Adicionalmente, se evaluaron alternativas con errores autorregresivos y de media móvil para examinar si era necesario incorporar dependencia temporal adicional.
+
+La especificación de regresión considerada en la comparación final fue:
+
+$$
+y_t =
+\beta_0 + \beta_1 M_t + \beta_2 N_t + \varepsilon_t,
+\qquad
+\varepsilon_t \sim N(0,\sigma^2).
+$$
+
+donde $M_t$ y $N_t$ son variables indicadoras que toman el valor de 1 cuando la observación corresponde a marzo o noviembre, respectivamente, y 0 en los demás casos. El coeficiente $\beta_0$ representa el nivel de referencia, mientras que $\beta_1$ y $\beta_2$ representan las diferencias promedio asociadas a los meses de marzo y noviembre. Los parámetros se estimaron mediante máxima verosimilitud bajo la especificación de errores utilizada.
+
+Especificaciones con tendencia y variables indicadoras mensuales; tendencia y variables indicadoras de marzo y noviembre; y variables indicadoras de marzo y noviembre.
+
+### Regresión dinámica
+
+La regresión dinámica amplía los modelos anteriores al permitir que los errores presenten dependencia temporal mediante una estructura ARIMA [@hyndman2021]. De esta forma, además de incorporar variables explicativas relacionadas con el calendario, se modela explícitamente la autocorrelación que puede permanecer en los errores de la regresión.
+
+La especificación dinámica evaluada incorporó las variables indicadoras de marzo y noviembre, con errores ARIMA(0,1,1) y deriva:
+
+$$
+\begin{aligned}
+y_t &= \beta_0 + \beta_1 M_t + \beta_2 N_t + \eta_t, \\
+(1-B)\eta_t &= c + (1+\theta_1 B)\varepsilon_t.
+\end{aligned}
+$$
+
+En este sistema, $\eta_t$ representa el error de la regresión, $c$ es el término de deriva y $\varepsilon_t$ es un proceso de ruido blanco. La incorporación de una estructura ARIMA permite representar la dependencia temporal que no explican las variables determinísticas. Los coeficientes de regresión y los parámetros del proceso de error se estimaron conjuntamente mediante máxima verosimilitud.
+
+Las variables explicativas corresponden a indicadores de calendario, por lo que son conocidas para todo el horizonte de pronóstico. La regresión con errores ARIMA(0,0,0) y regresión con indicadores de marzo y noviembre y errores ARIMA(0,1,1) con deriva fueron la seleccionadas. 
+
+
+## Comparación 
+
+La comparación de las especificaciones se realizó utilizando la función accuracy() del paquete forecast, que permite evaluar la precisión de los pronósticos a partir de los valores observados y estimados. Entre las medidas disponibles se consideraron el error cuadrático medio (RMSE), el error absoluto medio (MAE) y otras medidas complementarias de precisión.
+
+El criterio principal de selección fue la raíz del error cuadrático medio (RMSE), de manera que se favorecieron las especificaciones que presentaron menores errores de pronóstico. Los modelos se estimaron utilizando el conjunto de entrenamiento y posteriormente se generaron pronósticos para los 12 meses correspondientes al periodo de prueba, de agosto de 2025 a julio de 2026.
+
+En la comparación final se consideraron el suavizamiento exponencial simple, el modelo SARIMA seleccionado y la especificación de regresión con indicadores de marzo y noviembre. El modelo con menor RMSE fue seleccionado como el más adecuado entre estas alternativas para representar el comportamiento de la serie y generar pronósticos.
+
+No se utilizó el error porcentual absoluto medio (MAPE) como criterio principal, debido a que el balance presupuestario puede tomar valores negativos y cercanos a cero, lo que dificulta su interpretación.
+
+## Diagnóstico de los residuos
+
+Para evaluar el ajuste del modelo SARIMA seleccionado, se analizaron sus residuos mediante herramientas gráficas y pruebas estadísticas. Se examinó la presencia de autocorrelación mediante la función ACF y la prueba de Ljung-Box con 24 rezagos. Adicionalmente, se aplicó una prueba t para evaluar si la media de los residuos difería estadísticamente de cero.
+
+La normalidad se evaluó mediante las pruebas de Shapiro-Wilk [@shapiro1965] y Jarque-Bera [@jarque1980]. Asimismo, se estudió el comportamiento de la varianza mediante la función de autocorrelación de los residuos al cuadrado, la prueba de Ljung-Box aplicada a estos residuos y la prueba ARCH-LM [@engle1982] con 12 rezagos.
+
+Estas herramientas permitieron examinar si los residuos presentaban autocorrelación serial, desviaciones respecto a una media nula, evidencia de heterocedasticidad condicional y diferencias respecto al supuesto de normalidad.
+
+## Pronósticos
+
+La evaluación predictiva se realizó mediante pronósticos de 12 meses generados a partir de los modelos estimados con las 91 observaciones del conjunto de entrenamiento. Estos pronósticos se compararon con los valores observados entre agosto de 2025 y julio de 2026, lo que permitió medir el desempeño de las distintas especificaciones en un periodo no utilizado para la estimación.
+
+Una vez seleccionado el modelo con base en su desempeño predictivo y en el diagnóstico de sus residuos, este se consideró como la especificación preferida para representar el comportamiento del balance presupuestario real.
+
+## Software y reproducibilidad
+
+El análisis se realizó en R versión 4.6.1 y el documento se elaboró mediante Quarto. Para la lectura y manipulación de los datos se utilizaron los paquetes readxl [@readxl] y tidyverse [@tidyverse]. La estimación de los modelos y la generación de pronósticos se realizaron mediante forecast [@forecast]. Además, se utilizaron tseries [@tseries] para las pruebas de estacionariedad, astsa [@astsa] para el análisis de autocorrelación y FinTS [@FinTS] para la prueba ARCH-LM.
+
+Las referencias bibliográficas de los paquetes utilizados se obtuvieron mediante la función citation() de R. El código reproducible que genera las tablas y figuras del artículo, junto con los datos utilizados, se encuentra disponible en [Repositorio en GitHub](https://github.com/Brandonsca07/PoryectoSeriesTemporales)
+
+
+# Resultados
+
+Como parte de la exploracion inicial, se presenta la serie original:
+
+```{r balance-plot}
+
+autoplot(Balance_ts, series = "Balance") +
+  geom_line(linewidth = 1, color = "#1B4F72") +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed",
+    linewidth = 0.6,
+    color = "gray35"
+  ) +
+  scale_y_continuous(labels = label_number(big.mark = ",", decimal.mark = ".")) +
+  labs(
+    title = "Figura 1. \nEvolución del Balance Presupuestario del Gobierno Central",
+    subtitle = "Diferencia mensual entre ingresos y egresos totales (2018–2026)",
+    x = "Año",
+    y = "Monto (millones de colones)",
+    caption = "Nota: La línea punteada indica equilibrio presupuestario (0).\nFuente: Ministerio de Hacienda."
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title = element_text(face = "bold", size = 14, color = "#111111"),
+    plot.subtitle = element_text(size = 10.5, color = "gray35", margin = margin(b = 10)),
+    plot.caption = element_text(size = 8.5, color = "gray45", hjust = 0, margin = margin(t = 10)),
+    axis.title = element_text(face = "bold", size = 10, color = "#222222"),
+    axis.text = element_text(color = "gray25"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_line(color = "gray90", linewidth = 0.4),
+    panel.grid.major.y = element_line(color = "gray88", linewidth = 0.4),
+    legend.position = "none",
+    plot.margin = margin(14, 16, 12, 14)
+  )
+```
+
+La serie temporal analizada (Figura 1) carece de una tendencia definida y no presenta un patrón estacional evidente. Si bien la dispersión general de los datos se mantiene constante a lo largo de todo el registro, el análisis por tramos muestra que la varianza local cambia con el tiempo, lo cual evidencia la presencia de volatilidad agrupada.
+
+Más allá de esta variabilidad general, el comportamiento de la serie permite identificar tres regímenes temporales bien diferenciados. El primero, comprendido entre 2018 y mediados de 2020, se caracteriza por una amplitud elevada con oscilaciones fuertes tanto positivas como negativas. Posteriormente, desde mediados de 2020 hasta finales de 2022, se observa un período de notable estabilidad y baja varianza (especialmente marcado entre 2021 y 2022), durante el cual las fluctuaciones se amortiguan y permanecen próximas a cero.
+
+Finalmente, entre 2023 y 2026 se produce una reactivación de la alta volatilidad. Esta última etapa destaca por registrar la caída más profunda de toda la serie a inicios de 2023, un evento que fue seguido de manera inmediata por repuntes marcados.
+
+```{r balance-decompose}
+Descompuesta_bal <- decompose(Balance_real_ts, type = "additive")
+
+autoplot(Descompuesta_bal) +
+  geom_line(linewidth = 0.85, color = "#1B4F72") +
+  facet_wrap(
+    ~parts,
+    scales = "free_y",
+    ncol = 1,
+    labeller = labeller(parts = c(
+      "data"      = "Serie observada",
+      "trend"     = "Tendencia",
+      "seasonal"  = "Componente estacional",
+      "remainder" = "Residuo (irregular)"
+    ))
+  ) +
+  scale_y_continuous(labels = label_number(big.mark = ",", decimal.mark = ".")) +
+  labs(
+    title = "Figura 2. \nDescomposición aditiva del Balance Presupuestario real",
+    subtitle = "Componentes de tendencia, estacionalidad y residuo en términos reales (2018–2026)",
+    x = "Año",
+    y = "Monto real (millones de colones)",
+    caption = "Nota: Descomposición clásica aditiva (Y = T + S + R) sobre la serie deflactada.\nFuente: Elaboración propia con datos del Ministerio de Hacienda / BCCR."
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title = element_text(face = "bold", size = 13.5, color = "#111111"),
+    plot.subtitle = element_text(size = 10, color = "gray35", margin = margin(b = 10)),
+    plot.caption = element_text(size = 8.5, color = "gray45", hjust = 0, margin = margin(t = 10)),
+    strip.text = element_text(face = "bold", size = 10, color = "#1B4F72", hjust = 0),
+    strip.background = element_rect(fill = "#F4F6F7", color = NA),
+    axis.title = element_text(face = "bold", size = 10, color = "#222222"),
+    axis.text = element_text(color = "gray25", size = 9),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_line(color = "gray90", linewidth = 0.4),
+    panel.grid.major.y = element_line(color = "gray88", linewidth = 0.4),
+    panel.spacing = unit(0.8, "lines"),
+    plot.margin = margin(14, 16, 12, 14)
+  )
+```
+
+```{r balance-estacional}
+library(ggplot2)
+library(forecast)
+library(scales)
+library(viridis)
+
+ggseasonplot(Balance_real_ts, year.labels = FALSE, continuous = TRUE) +
+  geom_line(linewidth = 0.85) +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed",
+    linewidth = 0.6,
+    color = "gray35"
+  ) +
+  scale_color_viridis_c(option = "mako", begin = 0.2, end = 0.85, name = "Año") +
+  scale_y_continuous(labels = label_number(big.mark = ",", decimal.mark = ".")) +
+  labs(
+    title = "Figura 3. \nEstacionalidad mensual del Balance Presupuestario real",
+    subtitle = "Comparación interanual del perfil estacional a lo largo del ciclo mensual",
+    x = "Mes",
+    y = "Monto real (millones de colones)",
+    caption = "Nota: La línea punteada indica equilibrio presupuestario (0) sobre la serie deflactada.\nFuente: Elaboración propia con datos del Ministerio de Hacienda / BCCR."
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title = element_text(face = "bold", size = 13.5, color = "#111111"),
+    plot.subtitle = element_text(size = 10, color = "gray35", margin = margin(b = 10)),
+    plot.caption = element_text(size = 8.5, color = "gray45", hjust = 0, margin = margin(t = 10)),
+    axis.title = element_text(face = "bold", size = 10, color = "#222222"),
+    axis.text = element_text(color = "gray25"),
+    legend.title = element_text(face = "bold", size = 9.5, color = "#222222"),
+    legend.text = element_text(size = 8.5, color = "gray25"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_line(color = "gray90", linewidth = 0.4),
+    panel.grid.major.y = element_line(color = "gray88", linewidth = 0.4),
+    plot.margin = margin(14, 16, 12, 14)
+  )
+```
+
+```{r}
+library(ggplot2)
+library(forecast)
+
+ggAcf(Balance_real_ts, lag.max = 36) +
+  geom_segment(linewidth = 0.8, color = "#1B4F72") +
+  geom_point(size = 1.8, color = "#1B4F72") +
+  labs(
+    title = "Figura 4.\nFunción de autocorrelación (ACF) del Balance Presupuestario real",
+    subtitle = "Correlaciones seriales por rezago mensual y bandas de significancia aproximada al 95%",
+    x = "Rezago (meses)",
+    y = "Autocorrelación",
+    caption = "Nota: Las líneas azules punteadas delimitan la banda aproximada de ruido blanco al 95%.\nFuente: Elaboración propia con datos del Ministerio de Hacienda / BCCR."
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title = element_text(face = "bold", size = 13.5, color = "#111111"),
+    plot.subtitle = element_text(size = 10, color = "gray35", margin = margin(b = 10)),
+    plot.caption = element_text(size = 8.5, color = "gray45", hjust = 0, margin = margin(t = 10)),
+    axis.title = element_text(face = "bold", size = 10, color = "#222222"),
+    axis.text = element_text(color = "gray25"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_line(color = "gray90", linewidth = 0.4),
+    panel.grid.major.y = element_line(color = "gray88", linewidth = 0.4),
+    plot.margin = margin(14, 16, 12, 14)
+  )
+```
+
+```{r}
+#| label: plot-dif-balance1
+#| echo: false
+#| message: false
+#| warning: false
+#| fig-width: 8.5
+#| fig-height: 4.8
+library(astsa)
+
+op <- par(no.readonly = TRUE)
+on.exit(par(op), add = TRUE)
+
+par(
+  oma = c(3.2, 0.5, 3.4, 0.5),
+  mgp = c(2.3, 0.65, 0),
+  cex.axis = 0.9,
+  cex.lab = 0.95,
+  col.main = "#111111",
+  fg = "gray35"
+)
+
+invisible(capture.output(
+  acf2(
+    Balance_real_ts,
+    max.lag = 100,
+    main = ""
+  )
+))
+
+# Título principal y subtítulo dentro del margen superior externo
+mtext(
+  "Figura 5.Funciones de autocorrelación (ACF y PACF) del Balance Presupuestario real",
+  side = 3,
+  outer = TRUE,
+  line = 1.7,
+  adj = 0,
+  cex = 1.15,
+  font = 2,
+  col = "#111111"
+)
+mtext(
+  "Autocorrelaciones simples y parciales hasta 100 rezagos mensuales con bandas aproximadas al 95%",
+  side = 3,
+  outer = TRUE,
+  line = 0.4,
+  adj = 0,
+  cex = 0.9,
+  col = "gray35"
+)
+
+# Nota metodológica y fuente en margen inferior externo
+mtext(
+  "Nota: Las líneas discontinuas indican los límites aproximados de ruido blanco al 95% (sobre la serie deflactada).\nFuente: Elaboración propia con datos del Ministerio de Hacienda / BCCR.",
+  side = 1,
+  outer = TRUE,
+  line = 2.0,
+  adj = 0,
+  cex = 0.8,
+  col = "gray45"
+)
+```
+
+Las pruebas estadísticas no permiten rechazar la hipótesis nula de independencia lineal en los primeros 24 rezagos, lo que indica la ausencia de autocorrelación lineal significativa. En conjunto, los valores pasados del balance presupuestario real no aportan información lineal útil para predecir el mes siguiente. Asimismo, el leve pico visible en el rezago 24 de la función de autocorrelación (ACF) responde a variaciones aleatorias propias de la muestra, compatibles con un proceso de ruido blanco en sentido débil, por lo que se descarta una estacionalidad anual marcada.
+
+Estos resultados tienen consecuencias directas para el modelado bajo el enfoque Box-Jenkins o ARIMA. Un modelo ARIMA convencional centrado en la media ofrecerá poca utilidad, ya que la serie actúa como un proceso sin memoria lineal en su nivel medio, equivalente a un modelo ARIMA(0,0,0) con media constante. Incluir términos autorregresivos (AR) o de medias móviles (MA) suele producir estimaciones estadísticamente no significativas o sobreajuste, lo que lleva a pronósticos planos iguales al promedio histórico.
+
+Por último, aplicar diferenciación resulta innecesario, con órdenes de integración regular y estacional iguales a cero ($d = 0$ y $D = 0$). Diferenciar una serie que ya se comporta como ruido blanco en media solo añade varianza artificial al modelo, un problema conocido como sobre-diferenciación.
+
+```{r particion}
+y.train<-window(Balance_real_ts,start=c(2018,1),end=c(2025,7))
+y.test<-window(Balance_real_ts,start=c(2025,8),end=c(2026,7))
+```
+
+## Suavizamiento exponencial
+
+```{r modelos-ets}
+#| label: mi-chunk-oculto
+#| echo: false
+#| results: hide
+#| fig-show: hide
+#| message: false
+#| warning: false
+ses1 <- ses(y.train,h=12,initial="simple")
+names(ses1)
+```
+
+```{r}
+#| label: mi-chunk-oculto1
+#| echo: false
+#| results: hide
+#| fig-show: hide
+#| message: false
+#| warning: false
+ses1$model
+```
+El parámetro de suavizamiento es relativamente bajo. Esto significa que el modelo pondera con \~16.8% la observación más reciente y con \~83.2% el nivel suavizado anterior, reaccionando de forma moderada a los cambios bruscos de un mes a otro.
+$\alpha = 0.1678$:
+
+```{r}
+#| label: mi-chunk-oculto2
+#| echo: false
+#| results: hide
+#| fig-show: hide
+#| message: false
+#| warning: false
+ses1
+```
+
+```{r}
+#| label: plot-dif-balance2
+#| echo: false
+#| message: false
+#| warning: false
+#| fig-width: 8.5
+#| fig-height: 4.8
+library(ggplot2)
+library(forecast)
+library(scales)
+
+autoplot(ses1, series = "Observado") +
+  autolayer(fitted(ses1), series = "Ajustado (SES)", linewidth = 0.9, linetype = "dashed") +
+  geom_line(linewidth = 0.85) +
+  scale_color_manual(
+    values = c("Observado" = "#1B4F72", "Ajustado (SES)" = "#C0392B"),
+    name = "Serie"
+  ) +
+  scale_y_continuous(labels = label_number(big.mark = ",", decimal.mark = ".")) +
+  labs(
+    title = "Figura 6. \nAjuste del modelo de suavizamiento exponencial simple (SES)",
+    subtitle = "Comparación entre la serie observada y los valores ajustados del Balance Presupuestario real",
+    x = "Año (ciclo mensual)",
+    y = "Balance real (millones de colones)",
+    caption = "Nota: Suavizamiento exponencial simple (SES) aplicado sobre la serie deflactada.\nFuente: Elaboración propia con datos del Ministerio de Hacienda / BCCR."
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title = element_text(face = "bold", size = 13.5, color = "#111111"),
+    plot.subtitle = element_text(size = 10, color = "gray35", margin = margin(b = 10)),
+    plot.caption = element_text(size = 8.5, color = "gray45", hjust = 0, margin = margin(t = 10)),
+    axis.title = element_text(face = "bold", size = 10, color = "#222222"),
+    axis.text = element_text(color = "gray25"),
+    legend.position = "top",
+    legend.justification = "left",
+    legend.title = element_text(face = "bold", size = 9.5, color = "#222222"),
+    legend.text = element_text(size = 9, color = "gray25"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_line(color = "gray90", linewidth = 0.4),
+    panel.grid.major.y = element_line(color = "gray88", linewidth = 0.4),
+    plot.margin = margin(14, 16, 12, 14)
+  )
+```
+
+Como observamos en la figura 6 el pronóstico sigue el comportamiento general suavizado de la serie de entrenamiento, pero reduce de forma marcada tanto los picos altos como las caídas pronunciadas. De este modo, el modelo evita reacciones extremas ante cambios bruscos del registro histórico y ofrece una trayectoria más estable y moderada.
+
+```{r}
+pronostico_ses1 <- forecast(ses1, h=12)
+accuracy_ses1 <- accuracy(pronostico_ses1, y.test);accuracy_ses1
+```
+
+```{r}
+autoplot(pronostico_ses1) +
+  autolayer(y.test, series = "Valores reales") +
+  labs(
+    title = "Pronóstico SES del balance",
+    x = "Mes",
+    y = "Balance"
+  )
+```
+
+Se observa que los datos reales de prueba presentan fluctuaciones importantes, incluidos picos altos cercanos a 5e+05 y 7.5e+05 que la línea plana no capta bien, aunque la mayoría de las observaciones quedan dentro de las bandas de incertidumbre, con algún pico rozando o superando el límite superior del 80 %.
+
+```{r}
+#| label: mi-chunk-oculto3
+#| echo: false
+#| results: hide
+#| fig-show: hide
+#| message: false
+#| warning: false
+autoplot(Balance_real_ts) +
+  autolayer(y.train, series = "Entrenamiento") +
+  autolayer(y.test, series = "Prueba") +
+  labs(
+    title = "Balance real: entrenamiento y prueba",
+    x = "Tiempo",
+    y = "Balance"
+  )
+```
+
+```{r}
+checkresiduals(ses1)
+
+```
+
+```{r}
+#| label: mi-chunk-oculto4
+#| echo: false
+#| results: hide
+#| fig-show: hide
+#| message: false
+#| warning: false
+library(forecast)
+library(tseries)
+library(FinTS)
+
+res_ses <- na.omit(residuals(ses1))
+
+# Diagnóstico visual: verifica visualmente que ningún rezago salga de las bandas.
+checkresiduals(ses1)
+
+# Independencia/ausencia de autocorrelación (Ruido blanco en media). Un p > 0.05 indica que autocorrelación no significativa.
+
+Box.test(res_ses, lag = 12, type = "Ljung-Box", fitdf = 1)
+
+# Media cero para contrastar si el promedio de los errores es cero.
+
+t.test(res_ses)
+
+# Homocedasticidad / efectos ARCH para detectar volatilidad agrupada.
+
+Box.test(res_ses^2, lag = 12, type = "Ljung-Box")
+ArchTest(res_ses, lags = 12)
+
+# Normalidad
+shapiro.test(res_ses)
+jarque.bera.test(res_ses)
+```
+
+En ambas pruebas de Ljung-Box, el valor p es alto (mayor que 0.05), por lo que no se rechaza la hipótesis nula de independencia o ausencia de autocorrelación serial en los residuos. Tampoco se rechaza la hipótesis nula de ausencia de autocorrelación en los residuos al cuadrado ni de efectos ARCH en los primeros 12 rezagos, pese a que en el gráfico se observen picos aislados y cambios de amplitud en la serie.
+
+En cuanto a las pruebas de normalidad, se rechaza el supuesto de normalidad en los residuos. Esto confirma el sesgo positivo y las colas pesadas observadas en el histograma, lo que indica que los intervalos de predicción construidos bajo normalidad deben interpretarse con cautela.
+
+## Modelos ARIMA / SARIMA
+
+```{r}
+#| label: plot-dif-balance3
+#| echo: false
+#| message: false
+#| warning: false
+#| fig-width: 8.5
+#| fig-height: 4.8
+library(ggplot2)
+library(forecast)
+library(scales)
+
+dif.y <- diff(Balance_real_ts)
+
+autoplot(dif.y) +
+  geom_line(linewidth = 0.85, color = "#1B4F72") +
+  geom_hline(
+    yintercept = 0,
+    linetype = "dashed",
+    linewidth = 0.6,
+    color = "gray35"
+  ) +
+  scale_y_continuous(labels = label_number(big.mark = ",", decimal.mark = ".")) +
+  labs(
+    title = "Figura 7. Primera diferencia del Balance Presupuestario real",
+    subtitle = "Variación mensual absoluta de la serie deflactada (ΔYt = Yt − Yt−1)",
+    x = "Año (ciclo mensual)",
+    y = "Variación real (millones de colones)",
+    caption = "Nota: La línea punteada indica variación nula (0) tras aplicar primera diferencia.\nFuente: Elaboración propia con datos del Ministerio de Hacienda / BCCR."
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title = element_text(face = "bold", size = 13.5, color = "#111111"),
+    plot.subtitle = element_text(size = 10, color = "gray35", margin = margin(b = 10)),
+    plot.caption = element_text(size = 8.5, color = "gray45", hjust = 0, margin = margin(t = 10)),
+    axis.title = element_text(face = "bold", size = 10, color = "#222222"),
+    axis.text = element_text(color = "gray25"),
+    panel.grid.minor = element_blank(),
+    panel.grid.major.x = element_line(color = "gray90", linewidth = 0.4),
+    panel.grid.major.y = element_line(color = "gray88", linewidth = 0.4),
+    plot.margin = margin(14, 16, 12, 14)
+  )
+```
+
+En la función de autocorrelación (ACF) se observan claramente picos en los rezagos 1 y 24, mientras que en la función de autocorrelación parcial (PACF) se aprecia un decrecimiento gradual, lo que sugiere que un modelo SARIMA(0,1,1)(0,0,1) podría ser adecuado
+
+```{r}
+#| label: plot-dif-balance4
+#| echo: false
+#| message: false
+#| warning: false
+#| fig-width: 8.5
+#| fig-height: 4.8
+library(astsa)
+
+op <- par(no.readonly = TRUE)
+on.exit(par(op), add = TRUE)
+
+par(
+  oma = c(3.2, 0.5, 3.4, 0.5),
+  mgp = c(2.3, 0.65, 0),
+  cex.axis = 0.9,
+  cex.lab = 0.95,
+  col.main = "#111111",
+  fg = "gray35"
+)
+
+invisible(capture.output(
+  acf2(
+    dif.y,
+    main = ""
+  )
+))
+
+mtext(
+  "Figura 8. Funciones de autocorrelación (ACF y PACF) de la primera diferencia",
+  side = 3,
+  outer = TRUE,
+  line = 1.7,
+  adj = 0,
+  cex = 1.15,
+  font = 2,
+  col = "#111111"
+)
+mtext(
+  "Autocorrelaciones simples y parciales de ΔYt con bandas aproximadas de ruido blanco al 95%",
+  side = 3,
+  outer = TRUE,
+  line = 0.4,
+  adj = 0,
+  cex = 0.9,
+  col = "gray35"
+)
+mtext(
+  "Nota: Calculadas sobre la primera diferencia de la serie deflactada.\nFuente: Elaboración propia con datos del Ministerio de Hacienda / BCCR.",
+  side = 1,
+  outer = TRUE,
+  line = 2.0,
+  adj = 0,
+  cex = 0.8,
+  col = "gray45"
+)
+```
+
+
+```{r}
+#| label: mi-chunk-ocult
+#| echo: false
+#| results: hide
+#| fig-show: hide
+#| message: false
+#| warning: false
+dif.y12<-diff(dif.y,12)
+ts.plot(dif.y12)
+acf2(dif.y12, max.lag = 60)
+```
+
+```{r}
+#| label: mi-chunk-oculto5
+#| echo: false
+#| results: hide
+#| fig-show: hide
+#| message: false
+#| warning: false
+y.train<-window(Balance_real_ts,start=c(2018,1),end=c(2025,7))
+y.test<-window(Balance_real_ts,start=c(2025,8),end=c(2026,7))
+```
+
+```{r}
+#| label: mi-chunk-oculto600
+#| echo: false
+#| results: hide
+#| fig-show: hide
+#| message: false
+#| warning: false
+mod1 <- Arima(y.train, order=c(0,0,1))
+summary(mod1)
+```
+
+```{r}
+#| label: mi-chunk-oculto129
+#| echo: false
+#| results: hide
+#| fig-show: hide
+#| message: false
+#| warning: false
+res<-mod1$res
+ts.plot(res)
+```
+
+```{r}
+#| label: mi-chunk-oculto65
+#| echo: false
+#| results: hide
+#| fig-show: hide
+#| message: false
+#| warning: false
+acf(res)
+pacf(res)
+```
+
+```{r}
+#| label: mi-chunk-oculto6
+#| echo: false
+#| results: hide
+#| fig-show: hide
+#| message: false
+#| warning: false
+tsdiag(mod1)
+```
+
+```{r}
+#| label: mi-chunk-oculto688
+#| echo: false
+#| results: hide
+#| fig-show: hide
+#| message: false
+#| warning: false
+checkresiduals(mod1,lag=10)
+```
+
+```{r}
+#| label: mi-chunk-oculto7
+#| echo: false
+#| results: hide
+#| fig-show: hide
+#| message: false
+#| warning: false
+shapiro.test(res)
+```
+
+```{r}
+#| label: mi-chunk-oculto8
+#| echo: false
+#| results: hide
+#| fig-show: hide
+#| message: false
+#| warning: false
+jarque.bera.test(res)
+```
+
+```{r}
+#| label: mi-chunk-oculto9
+#| echo: false
+#| results: hide
+#| fig-show: hide
+#| message: false
+#| warning: false
+mod2 <- auto.arima(y.train)
+summary(mod2)
+```
+
+```{r}
+#| label: mi-chunk-oculto10t
+#| echo: false
+#| results: hide
+#| fig-show: hide
+#| message: false
+#| warning: false
+mod3 = Arima(y.train, order=c(0,0,1),
+              seasonal=list(order=c(0,0,2),period=12))
+summary(mod3)
+```
+
+```{r}
+#| label: mi-chunk-oculto10563
+#| echo: false
+#| results: hide
+#| fig-show: hide
+#| message: false
+#| warning: false
+mod4 = Arima(y.train, order=c(0,0,1),
+              seasonal=list(order=c(0,0,1),period=12))
+summary(mod4)
+```
+
+```{r}
+#| label: mi-chunk-oculto10
+#| echo: false
+#| results: hide
+#| fig-show: hide
+#| message: false
+#| warning: false
+mod5 = Arima(y.train, order=c(0,0,1), #con dif 1 ma=-1
+              seasonal=list(order=c(0,1,2),period=12))
+summary(mod5)
+
+```
+
+```{r}
+#| label: mi-chunk-oculto101234
+#| echo: false
+#| results: hide
+#| fig-show: hide
+#| message: false
+#| warning: false
+pronostico_mod1 <- forecast(mod1, h=12)
+accuracy_mod1 <- accuracy(pronostico_mod1,y.test);accuracy_mod1
+
+pronostico_mod2 <- forecast(mod2, h=12)
+accuracy_mod2 <- accuracy(pronostico_mod2,y.test);accuracy_mod2
+
+pronostico_mod3 <- forecast(mod3, h=12)
+accuracy_mod3 <- accuracy(pronostico_mod3,y.test);accuracy_mod3
+
+pronostico_mod4 <- forecast(mod4, h=12)
+accuracy_mod4 <- accuracy(pronostico_mod4,y.test);accuracy_mod4
+
+pronostico_mod5 <- forecast(mod5, h=12)
+accuracy_mod5 <- accuracy(pronostico_mod5,y.test);accuracy_mod5
+```
+
+Tabla 1.
+
+*Criterios de ajuste y métricas de error en prueba (h = 12) para los modelos ARIMA/SARIMA.*
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+
+library(knitr)
+
+modelos <- list(mod1, mod2, mod3, mod4, mod5)
+accs <- list(accuracy_mod1, accuracy_mod2, accuracy_mod3, accuracy_mod4, accuracy_mod5)
+
+especificaciones <- c(
+  "M1: ARIMA(0,1,1)",
+  "M2: auto.arima",
+  "M3: SARIMA(0,1,1)(0,0,2)",
+  "M4: SARIMA(0,1,1)(0,0,1)",
+  "M5: SARIMA(0,0,1)(0,1,2)"
+)
+
+filas <- lapply(seq_along(modelos), function(i) {
+  m <- modelos[[i]]
+  a <- as.matrix(accs[[i]])
+  te <- if (nrow(a) >= 2) a[2, ] else rep(NA_real_, 5)
+
+  data.frame(
+    Modelo = especificaciones[i],
+    AIC = round(as.numeric(m$aic), 2),
+    BIC = round(as.numeric(m$bic), 2),
+    RMSE = round(as.numeric(te["RMSE"]), 2),
+    MAE = round(as.numeric(te["MAE"]), 2),
+    MAPE = round(as.numeric(te["MAPE"]), 2),
+    stringsAsFactors = FALSE
+  )
+})
+
+df_apa <- do.call(rbind, filas)
+rownames(df_apa) <- NULL
+
+kable(
+  df_apa,
+  format = "pipe",
+  align = c("l", "r", "r", "r", "r", "r"),
+  digits = 2
+)
+```
+
+
+En este caso nos quedamos con el modelo 3 como el modelo con mejor ajuste
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| fig-width: 7
+#| fig-height: 4
+
+autoplot(mod3) +
+  ggplot2::labs(title = "Raíces inversas AR/MA (mod3)") +
+  ggplot2::theme_minimal()
+```
+
+```{r}
+#| echo: false
+#| message: false
+#| warning: false
+#| fig-width: 8
+#| fig-height: 5
+
+checkresiduals(mod3, lag = 24, plot = TRUE)
+```
+
+En las pruebas de Dickey-Fuller, tanto para diferenciacion 1 como para diferenciacion de 12 se rechaza la hipótesis nula de raíz unitaria, lo que indica que la primera diferencia y la serie con diferencia regular y estacional son estacionarias.
+
+En la función de autocorrelación (ACF) de los residuos, todos los rezagos (incluso más allá del 24) se mantienen dentro de las franjas azules punteadas, sin autocorrelación evidente. En concordancia, la prueba de Ljung-Box arroja un valor p de 0.9853, lo que muestra que no hay autocorrelación serial significativa en los residuos hasta el rezago 24. Por su parte, la prueba t presenta un valor p de 0.61 (mayor que 0.05) y el cero queda dentro del intervalo de confianza del 95 %, por lo que no se rechaza que la media de los residuos sea cero.
+
+Finalmente, ambas pruebas de normalidad rechazan de forma contundente el supuesto normal, confirmando que los residuos no siguen una distribución normal debido a la presencia de valores atípicos y asimetría positiva.
+
+##  Regresión / Regresión Dinamica
+
+Para modelar la dinámica del balance presupuestario real, se dividió la serie en una muestra de entrenamiento hasta junio de 2025 y un conjunto de prueba a partir de julio de 2025, construyendo regresores que capturan una tendencia lineal, la estacionalidad mensual completa y efectos puntuales en marzo y noviembre. A partir de regresiones preliminares sobre la muestra de entrenamiento y el análisis de las funciones de autocorrelación (ACF y PACF) de sus residuos, se estimaron cuatro especificaciones de regresión con estructura de errores Arima: tres modelos con términos de error de orden (0,0,0) que combinan de forma distinta la tendencia, las dummies mensuales y los indicadores de marzo y noviembre, y un cuarto modelo que incorpora dichos indicadores de meses clave junto con un error integrado y de media móvil de primer orden (0,1,1) con deriva.
+
+```{r}
+#| label: reg-dinamica-particion
+#| echo: false
+#| message: false
+#| warning: false
+
+library(forecast)
+library(astsa)
+
+# Partición cronológica: entrenamiento hasta junio 2025, prueba desde julio 2025
+y.tr <- window(Balance_real_ts, end = c(2025, 6))
+y.te <- window(Balance_real_ts, start = c(2025, 7))
+h <- length(y.te)
+
+# Regresores en muestra de entrenamiento
+tt <- seq_along(y.tr)
+mes <- seasonaldummy(y.tr)
+marzo <- as.numeric(cycle(y.tr) == 3)
+noviembre <- as.numeric(cycle(y.tr) == 11)
+
+X1 <- cbind(t = tt, mes)
+X2 <- cbind(t = tt, marzo = marzo, noviembre = noviembre)
+X3 <- cbind(marzo = marzo, noviembre = noviembre)
+
+# Regresiones preliminares para inspeccionar residuos (ACF/PACF)
+R1 <- tslm(y.tr ~ X1)
+R2 <- tslm(y.tr ~ X2)
+R3 <- tslm(y.tr ~ X3)
+```
+
+
+```{r}
+#| label: reg-dinamica-modelos
+#| echo: false
+#| message: false
+#| warning: false
+
+# M1-M3: error (0,0,0) — válido solo si los residuos de regresión no presentan autocorrelación
+M1 <- Arima(y.tr, order = c(0, 0, 0), xreg = X1)
+M2 <- Arima(y.tr, order = c(0, 0, 0), xreg = X2)
+M3 <- Arima(y.tr, order = c(0, 0, 0), xreg = X3)
+
+# M4: error integrado/MA(1) sobre X3 (sin deriva redundante; revisar si la serie exige drift)
+M4 <- Arima(y.tr, order = c(0, 1, 1), xreg = X3, include.drift = FALSE)
+
+# M5: alternativa con componente estacional/AR en el error si persisten rezagos estacionales (p. ej. 12/24)
+M5 <- Arima(y.tr, order = c(1, 0, 0), xreg = X3)
+```
+
+Tabla 2.
+
+*Diagnóstico de autocorrelación serial (prueba de Ljung-Box a 12 rezagos) en los residuos de los modelos de regresión dinámica.*
+
+```{r}
+#| label: cuadro-diag-res-reg
+#| echo: false
+#| message: false
+#| warning: false
+
+library(knitr)
+
+mods_reg <- list(
+  "M1: Tendencia + mes, error (0,0,0)" = M1,
+  "M2: Tendencia + mar/nov, error (0,0,0)" = M2,
+  "M3: Mar/nov, error (0,0,0)" = M3,
+  "M4: Mar/nov, error (0,1,1)" = M4,
+  "M5: Mar/nov, error SARIMA(1,0,0)(0,1,1)" = M5
+)
+
+filas_lb <- lapply(names(mods_reg), function(nm) {
+  m <- mods_reg[[nm]]
+  res <- na.omit(as.numeric(residuals(m)))
+  k_par <- sum(m$arma[1:4])
+  lb <- Box.test(res, lag = 12, type = "Ljung-Box", fitdf = min(k_par, 11))
+
+  data.frame(
+    Modelo = nm,
+    AICc = round(as.numeric(m$aicc), 2),
+    Q_LB12 = round(as.numeric(lb$statistic), 2),
+    p_valor = if (lb$p.value < 0.0001) "< 0.0001" else sprintf("%.4f", lb$p.value),
+    stringsAsFactors = FALSE
+  )
+})
+
+df_lb <- do.call(rbind, filas_lb)
+rownames(df_lb) <- NULL
+
+kable(
+  df_lb,
+  format = "pipe",
+  align = c("l", "r", "r", "r"),
+  digits = 2
+)
+```
+
+Tabla 3.
+
+*Criterios de ajuste y métricas de error en prueba (h = 12) para los modelos de regresión con errores ARMA/ARIMA.*
+
+
+```{r}
+#| label: reg-dinamica-pronostico
+#| echo: false
+#| message: false
+#| warning: false
+
+tt.f <- (length(y.tr) + 1):(length(y.tr) + h)
+mes.f <- cycle(ts(rep(0, h), start = c(2025, 7), frequency = 12))
+
+X1.f <- cbind(t = tt.f, seasonaldummy(y.tr, h))
+X2.f <- cbind(t = tt.f, marzo = as.numeric(mes.f == 3), noviembre = as.numeric(mes.f == 11))
+X3.f <- cbind(marzo = as.numeric(mes.f == 3), noviembre = as.numeric(mes.f == 11))
+
+p1 <- forecast(M1, xreg = X1.f)
+p2 <- forecast(M2, xreg = X2.f)
+p3 <- forecast(M3, xreg = X3.f)
+p4 <- forecast(M4, xreg = X3.f)
+p5 <- forecast(M5, xreg = X3.f)
+
+accs_p <- list(
+  accuracy(p1, y.te),
+  accuracy(p2, y.te),
+  accuracy(p3, y.te),
+  accuracy(p4, y.te),
+  accuracy(p5, y.te)
+)
+
+nombres_p <- names(mods_reg)
+
+filas_p <- lapply(seq_along(mods_reg), function(i) {
+  m <- mods_reg[[i]]
+  a <- as.matrix(accs_p[[i]])
+  te <- if (nrow(a) >= 2) a[2, ] else rep(NA_real_, ncol(a))
+
+  data.frame(
+    Modelo = nombres_p[i],
+    AICc = round(as.numeric(m$aicc), 2),
+    RMSE = round(as.numeric(te["RMSE"]), 2),
+    MAE = round(as.numeric(te["MAE"]), 2),
+    MAPE = round(as.numeric(te["MAPE"]), 2),
+    stringsAsFactors = FALSE
+  )
+})
+
+df_p_apa <- do.call(rbind, filas_p)
+rownames(df_p_apa) <- NULL
+
+kable(
+  df_p_apa,
+  format = "pipe",
+  align = c("l", "r", "r", "r", "r"),
+  digits = 2
+)
+```
+
+# Modelo Seleccionado 
+
+Tabla 4.
+
+*Comparación del desempeño predictivo fuera de muestra del balance presupuestario real entre enfoques de suavizamiento, SARIMA y regresión dinámica.*
+
+```{r}
+#| label: cuadro-comparacion-final
+#| echo: false
+#| message: false
+#| warning: false
+
+library(knitr)
+
+accs_comp <- list(accuracy_ses1, accuracy_mod3, accuracy(p3, y.te))
+
+etiquetas_comp <- c(
+  "Suavizamiento exponencial simple",
+  "SARIMA",
+  "Regresión dinámica"
+)
+
+filas_comp <- lapply(seq_along(accs_comp), function(i) {
+  a <- as.matrix(accs_comp[[i]])
+  fila_eval <- if (nrow(a) >= 2) a[2, ] else a[1, ]
+
+  data.frame(
+    Modelo = etiquetas_comp[i],
+    RMSE = round(as.numeric(fila_eval["RMSE"]), 2),
+    MAE = round(as.numeric(fila_eval["MAE"]), 2),
+    MAPE = round(as.numeric(fila_eval["MAPE"]), 2),
+    stringsAsFactors = FALSE
+  )
+})
+
+df_comp_apa <- do.call(rbind, filas_comp)
+rownames(df_comp_apa) <- NULL
+
+kable(
+  df_comp_apa,
+  format = "pipe",
+  align = c("l", "r", "r", "r"),
+  digits = 2
+)
+```
+
+
+Tras contrastar las distintas alternativas de modelación y evaluar su desempeño predictivo fuera de muestra sobre el balance presupuestario real, el modelo SARIMA se consolida como la especificación ganadora del estudio. Su selección responde a un equilibrio sólido entre parsimonia, capacidad para capturar la dinámica temporal y estacional de la serie y menor magnitud en los errores de pronóstico en la muestra de prueba, ofreciendo una representación confiable de la trayectoria esperada del balance real para la toma de decisiones y el análisis fiscal.
+
+Supuestos del modelo:
+
+1. Diagnóstico de residuos y volatilidad
+
+```{r}
+#| label: supuestos-mod3
+#| echo: false
+#| message: false
+#| warning: false
+#| fig-width: 8
+#| fig-height: 5
+
+checkresiduals(mod3, lag = 24, plot = TRUE)
+```
+
+```{r}
+#| label: acf2-res2-mod3
+#| echo: false
+#| message: false
+#| warning: false
+#| fig-width: 8
+#| fig-height: 4
+
+astsa::acf2(na.omit(residuals(mod3))^2, max.lag = 24, main = "ACF y PACF de residuos al cuadrado (mod3)")
+```
+
+
+2. Pronóstico final
+
+```{r}
+#| label: pronostico-final-mod3
+#| echo: false
+#| message: false
+#| warning: false
+#| fig-width: 8.5
+#| fig-height: 4.8
+
+library(ggplot2)
+library(forecast)
+
+autoplot(pronostico_mod3) +
+  autolayer(y.te, series = "Valores reales", linewidth = 0.9) +
+  scale_color_manual(values = c("Valores reales" = "#1B365D")) +
+  labs(
+    title = "Pronóstico del balance presupuestario real",
+    subtitle = "Comparación en el período de prueba frente a las observaciones reales",
+    x = "Período",
+    y = "Balance real",
+    color = NULL
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    plot.title = element_text(face = "bold", size = 12),
+    plot.subtitle = element_text(color = "gray35", size = 10),
+    legend.position = "top",
+    panel.grid.minor = element_blank()
+  )
+```
+
+
+
+Tabla 5 
+
+*Evaluación del supuesto de normalidad de los errores del modelo ganador*
+
+```{r}
+#| label: cuadro-normalidad-mod3
+#| echo: false
+#| message: false
+#| warning: false
+
+library(knitr)
+library(tseries)
+
+res_mod3 <- na.omit(as.numeric(residuals(mod3)))
+sw_mod3  <- shapiro.test(res_mod3)
+jb_mod3  <- jarque.bera.test(res_mod3)
+
+df_norm_mod3 <- data.frame(
+  Prueba = c("Shapiro-Wilk (W)", "Jarque-Bera (JB)"),
+  Estadistico = round(c(as.numeric(sw_mod3$statistic), as.numeric(jb_mod3$statistic)), 4),
+  p_valor = ifelse(
+    c(sw_mod3$p.value, jb_mod3$p.value) < 0.0001,
+    "< 0.0001",
+    sprintf("%.4f", c(sw_mod3$p.value, jb_mod3$p.value))
+  ),
+  stringsAsFactors = FALSE
+)
+
+kable(
+  df_norm_mod3,
+  format = "pipe",
+  align = c("l", "r", "r"),
+  digits = 4
+)
+```
+
+Tabla 6 
+
+*Métricas de precisión en entrenamiento y prueba para el modelo ganador*
+
+```{r}
+#| label: cuadro-accuracy-mod3
+#| echo: false
+#| message: false
+#| warning: false
+
+library(knitr)
+
+acc_mat <- as.matrix(accuracy_mod3)
+muestras <- if (nrow(acc_mat) >= 2) {
+  c("Entrenamiento", "Prueba")
+} else {
+  c("Muestra evaluada")
+}
+
+cols_metricas <- intersect(c("RMSE", "MAE", "MAPE", "MASE"), colnames(acc_mat))
+
+df_acc_mod3 <- data.frame(
+  Muestra = muestras,
+  round(acc_mat[seq_along(muestras), cols_metricas, drop = FALSE], 2),
+  check.names = FALSE
+)
+rownames(df_acc_mod3) <- NULL
+
+kable(
+  df_acc_mod3,
+  format = "pipe",
+  align = c("l", rep("r", ncol(df_acc_mod3) - 1)),
+  digits = 2
+)
+```
+
+
+# Conclusiones
+
+El modelo elegido fue el SARIMA $(0,0,1)(0,0,2)_{12}$ (mod3), ya que fue el que se equivocó menos al pronosticar datos nuevos que no había visto antes (con un error promedio cuadrático de 298,477.8, superando al suavizamiento exponencial simple con 350,079.5, a otras variantes probadas y a los modelos de regresión dinámica con 311,662.1). Es un modelo sencillo y directo que capta los movimientos recientes del mes y los patrones que se repiten cada uno y dos años, sin forzar cambios o ajustes extra en los datos. Al revisar los errores que deja el modelo, no se aprecian patrones repetitivos que se hayan escapado y su promedio gira en torno a cero, aunque sí muestra sesgo hacia valores altos y saltos bruscos —como los picos y caídas fuertes vistos entre 2018 y mediados de 2020 y entre 2023 y 2026, separados por un tramo más tranquilo entre mediados de 2020 y finales de 2022— que hacen que los datos no sigan una curva normal tradicional.  
+
+Entre las principales limitaciones del estudio destacan la sensibilidad de los errores y de los intervalos paramétricos ante movimientos fiscales extremos —reflejada en un mayor RMSE en prueba (298,477.8) que en entrenamiento (278,973.4)—, el uso de un enfoque univariado sobre el balance neto sin covariables macroeconómicas explícitas (como actividad económica, inflación, tipo de cambio o tasas de interés) y la evaluación sobre una única ventana de prueba de 12 meses ($h = 12$) dentro de una muestra de 103 observaciones mensuales (enero de 2018 a julio de 2026). Asimismo, el comportamiento del balance presupuestario, que puede tomar valores cercanos a cero o negativos, confirma que el MAPE resulta poco informativo como criterio rector y que conviene priorizar métricas como RMSE, MAE y MASE. 
+
+Como recomendaciones para el seguimiento fiscal y futuras investigaciones, se sugiere complementar el pronóstico del balance neto con modelos para ingresos y egresos reales por separado a fin de identificar qué componente impulsa los picos o déficits mensuales. También resulta aconsejable evaluar otros modelos comunes en este tipo de series como los modelos ARCH/GARCH. 
+
+# Bibliografía {.unnumbered}
+
+::: {#refs}
+:::
